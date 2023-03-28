@@ -151,6 +151,52 @@ func setupNodes() []*v1.Node {
 	return []*v1.Node{node1, node2, node3}
 }
 
+func setupBigNodes() []*v1.Node {
+	node1 := getGeneralNode("test-node-1")
+	node1.Status.Capacity = v1.ResourceList{
+		v1.ResourceCPU:    *resource.NewMilliQuantity(2000000, resource.DecimalSI),
+		v1.ResourceMemory: *resource.NewQuantity(100e10, resource.BinarySI),
+		v1.ResourcePods:   *resource.NewQuantity(2000, resource.DecimalSI),
+		//ResourceNvidiaGPU: *resource.NewQuantity(0, resource.DecimalSI),
+	}
+	node1.Status.Allocatable = v1.ResourceList{
+		v1.ResourceCPU:    *resource.NewMilliQuantity(2000000, resource.DecimalSI),
+		v1.ResourceMemory: *resource.NewQuantity(100e10, resource.BinarySI),
+		v1.ResourcePods:   *resource.NewQuantity(2000, resource.DecimalSI),
+		//ResourceNvidiaGPU: *resource.NewQuantity(0, resource.DecimalSI),
+	}
+
+	node2 := getGeneralNode("test-node-2")
+	node2.Status.Capacity = v1.ResourceList{
+		v1.ResourceCPU:    *resource.NewMilliQuantity(2000000, resource.DecimalSI),
+		v1.ResourceMemory: *resource.NewQuantity(100e10, resource.BinarySI),
+		v1.ResourcePods:   *resource.NewQuantity(2000, resource.DecimalSI),
+		//v1.ResourceNvidiaGPU: *resource.NewQuantity(0, resource.DecimalSI),
+	}
+	node2.Status.Allocatable = v1.ResourceList{
+		v1.ResourceCPU:    *resource.NewMilliQuantity(2000000, resource.DecimalSI),
+		v1.ResourceMemory: *resource.NewQuantity(100e10, resource.BinarySI),
+		v1.ResourcePods:   *resource.NewQuantity(2000, resource.DecimalSI),
+		//v1.ResourceNvidiaGPU: *resource.NewQuantity(0, resource.DecimalSI),
+	}
+
+	node3 := getGeneralNode("test-node-3")
+	node3.Status.Capacity = v1.ResourceList{
+		v1.ResourceCPU:    *resource.NewMilliQuantity(2000000, resource.DecimalSI),
+		v1.ResourceMemory: *resource.NewQuantity(100e10, resource.BinarySI),
+		v1.ResourcePods:   *resource.NewQuantity(2000, resource.DecimalSI),
+		//ResourceNvidiaGPU: *resource.NewQuantity(0, resource.DecimalSI),
+	}
+	node3.Status.Allocatable = v1.ResourceList{
+		v1.ResourceCPU:    *resource.NewMilliQuantity(2000000, resource.DecimalSI),
+		v1.ResourceMemory: *resource.NewQuantity(100e10, resource.BinarySI),
+		v1.ResourcePods:   *resource.NewQuantity(2000, resource.DecimalSI),
+		//ResourceNvidiaGPU: *resource.NewQuantity(0, resource.DecimalSI),
+	}
+
+	return []*v1.Node{node1, node2, node3}
+}
+
 func TestPrediction(t *testing.T) {
 
 	tests := []struct {
@@ -225,6 +271,7 @@ func TestPrediction(t *testing.T) {
 				simulatedPod,
 				test.limit,
 				nil,
+				10000,
 			)
 
 			if err != nil {
@@ -249,6 +296,109 @@ func TestPrediction(t *testing.T) {
 			//4. check expected number of pods is scheduled and reflected in the resource storage
 			if cc.Report().Status.FailReason.FailType != test.failType {
 				t.Errorf("Unexpected stop reason occured: %v, expecting: %v", cc.Report().Status.FailReason.FailType, test.failType)
+			}
+
+			cc.Close()
+		})
+		// Wait until the scheduler is torn down
+		// time.Sleep(5 * time.Second)
+	}
+}
+
+func TestPredictionChanOverflow(t *testing.T) {
+
+	tests := []struct {
+		name        string
+		limit       int
+		channelSize int32
+		shouldPanic bool
+		nodes       []*v1.Node
+	}{
+		{
+			name:        "channel full panic",
+			channelSize: 1,
+			limit:       1000,
+			shouldPanic: true,
+			nodes:       setupBigNodes(),
+		},
+		{
+			name:        "channel not full should not panic",
+			limit:       1000,
+			channelSize: 10000,
+			shouldPanic: false,
+			nodes:       setupBigNodes(),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// 1. create fake storage with initial data
+			grace := int64(30)
+			simulatedPod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "simulated-pod", Namespace: "test-node-3", ResourceVersion: "10"},
+				Spec: v1.PodSpec{
+					RestartPolicy:                 v1.RestartPolicyAlways,
+					DNSPolicy:                     v1.DNSClusterFirst,
+					TerminationGracePeriodSeconds: &grace,
+					SecurityContext:               &v1.PodSecurityContext{},
+				},
+			}
+
+			limitResourceList := make(map[v1.ResourceName]resource.Quantity)
+			requestsResourceList := make(map[v1.ResourceName]resource.Quantity)
+
+			limitResourceList[v1.ResourceCPU] = *resource.NewMilliQuantity(50, resource.DecimalSI)
+			limitResourceList[v1.ResourceMemory] = *resource.NewQuantity(1e2, resource.BinarySI)
+			limitResourceList[ResourceNvidiaGPU] = *resource.NewQuantity(0, resource.DecimalSI)
+			requestsResourceList[v1.ResourceCPU] = *resource.NewMilliQuantity(50, resource.DecimalSI)
+			requestsResourceList[v1.ResourceMemory] = *resource.NewQuantity(1e2, resource.BinarySI)
+			requestsResourceList[ResourceNvidiaGPU] = *resource.NewQuantity(0, resource.DecimalSI)
+
+			var objs []runtime.Object
+			for _, node := range test.nodes {
+				objs = append(objs, node)
+			}
+			client := fakeclientset.NewSimpleClientset(objs...)
+
+			// set pod's resource consumption
+			simulatedPod.Spec.Containers = []v1.Container{
+				{
+					Resources: v1.ResourceRequirements{
+						Limits:   limitResourceList,
+						Requests: requestsResourceList,
+					},
+				},
+			}
+
+			// 2. create predictor
+			// - create simple configuration file for scheduler (use the default values or from systemd env file if reasonable)
+			kubeSchedulerConfig, err := utils.BuildKubeSchedulerCompletedConfig(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cc, err := New(kubeSchedulerConfig,
+				nil,
+				simulatedPod,
+				test.limit,
+				nil,
+				// small channel size makes the simulator panic
+				test.channelSize,
+			)
+			if test.shouldPanic {
+				defer func() {
+					if r := recover(); r == nil {
+						t.Errorf("The code did not panic, this test should panic with full channel")
+					}
+				}()
+			}
+
+			// 3. run predictor
+			if err := cc.SyncWithClient(client); err != nil {
+				t.Errorf("Unable to sync resources: %v", err)
+			}
+			if err := cc.Run(); err != nil {
+				t.Errorf("Unable to run analysis: %v", err)
 			}
 
 			cc.Close()

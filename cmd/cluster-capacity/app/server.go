@@ -156,7 +156,7 @@ func Run(opt *options.ClusterCapacityOptions) error {
 }
 
 func runSimulator(s *options.ClusterCapacityConfig, kubeSchedulerConfig *schedconfig.CompletedConfig) (*framework.ClusterCapacityReview, error) {
-	cc, err := framework.New(kubeSchedulerConfig, s.RestConfig, s.Pod, s.Options.MaxLimit, s.Options.ExcludeNodes)
+	cc, err := framework.New(kubeSchedulerConfig, s.RestConfig, s.Pod, s.Options.MaxLimit, s.Options.ExcludeNodes, 10000)
 	if err != nil {
 		return nil, err
 	}

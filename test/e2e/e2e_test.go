@@ -147,6 +147,7 @@ func TestLimitReached(t *testing.T) {
 		buildSimulatedPod(),
 		limit,
 		nil,
+		100,
 	)
 
 	if err != nil {
